@@ -9,7 +9,7 @@ import HttpProxyAgent from "https-proxy-agent";
 import { mkdirIfNotExists, checkAndRemoveFile } from "../utils/file.js";
 import { downloadBFile, getDownloadUrl, mergeFileToMp4 } from "../utils/bilibili.js";
 import { parseUrl, parseM3u8, downloadM3u8Videos, mergeAcFileToMp4 } from "../utils/acfun.js";
-import { transMap, douyinTypeMap, XHS_CK, TEN_THOUSAND } from "../utils/constant.js";
+import { transMap, douyinTypeMap, XHS_CK, TEN_THOUSAND, BILI_LARGE_VIDEO_LENGTH } from "../utils/constant.js";
 import { getIdVideo } from "../utils/common.js";
 import config from "../model/index.js";
 import Translate from "../utils/trans-strategy.js";
@@ -327,7 +327,7 @@ export class tools extends plugin {
         // 视频信息获取例子：http://api.bilibili.com/x/web-interface/view?bvid=BV1hY411m7cB
         // 请求视频信息
         const videoInfo = await getVideoInfo(url);
-        const { title, desc, duration, dynamic, stat, aid, cid } = videoInfo;
+        const { title, desc, duration, dynamic, stat, aid, cid, bvid } = videoInfo;
         // 限制时长
         if (duration > this.biliDuration) {
             e.reply(`当前视频时长约：${(duration / 60).toFixed(0)}分钟，\n大于管理员设置的最大时长 ${this.biliDuration / 60} 分钟！`);
@@ -353,22 +353,28 @@ export class tools extends plugin {
         // 创建文件，如果不存在
         const path = `${this.defaultPath}${this.e.group_id || this.e.user_id}/`;
         await mkdirIfNotExists(path);
-        // 下载文件
-        getDownloadUrl(url)
-            .then(data => {
-                this.downBili(`${path}temp`, data.videoUrl, data.audioUrl)
-                    .then(_ => {
-                        e.reply(segment.video(`${path}temp.mp4`));
-                    })
-                    .catch(err => {
-                        logger.error(err);
-                        e.reply("解析失败，请重试一下");
-                    });
+        // 自适应下载文件 （如果适配长度大于6分钟采用官方接口下载）
+        if (duration > BILI_LARGE_VIDEO_LENGTH) {
+            this.downBiliByAuthority(bvid, cid, path).then(_ => {
+                e.reply(segment.video(`${path}temp.mp4`));
             })
-            .catch(err => {
-                logger.error(err);
-                e.reply("解析失败，请重试一下");
-            });
+        } else {
+            getDownloadUrl(url)
+                .then(data => {
+                    this.downBili(`${path}temp`, data.videoUrl, data.audioUrl)
+                        .then(_ => {
+                            e.reply(segment.video(`${path}temp.mp4`));
+                        })
+                        .catch(err => {
+                            logger.error(err);
+                            e.reply("解析失败，请重试一下");
+                        });
+                })
+                .catch(err => {
+                    logger.error(err);
+                    e.reply("解析失败，请重试一下");
+                });
+        }
 
         // 如果有ck 并且 有openai的key
         if (this.biliSessData && this.openaiAccessToken) {
@@ -992,6 +998,33 @@ export class tools extends plugin {
         ]).then(data => {
             return mergeFileToMp4(data[0].fullFileName, data[1].fullFileName, `${title}.mp4`);
         });
+    }
+
+    /**
+     * 从官方api下载哔哩哔哩适配，解决大视频问题
+     * @param bvid
+     * @param cid
+     * @param path
+     * @returns {Promise<unknown>}
+     */
+    async downBiliByAuthority(bvid, cid, path) {
+        return fetch(`https://api.bilibili.com/x/player/playurl?bvid=${bvid}&cid=${cid}&qn=120`).then(async res => {
+            let json = await res.json()
+            let data = json.data
+            return data.durl[0].backup_url[0] || data.durl[0].backup_url[1] || data.durl[0].url
+        }).then(async videoUrl => {
+            await downloadBFile(
+                videoUrl,
+                `${path}temp.mp4`,
+                _.throttle(
+                    value =>
+                        logger.mark("视频下载进度", {
+                            data: value,
+                        }),
+                    1000,
+                ),
+            )
+        })
     }
 
     /**
